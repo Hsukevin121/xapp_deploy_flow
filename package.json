@@ -1,0 +1,17 @@
+{
+  "name": "xapp_deploy_flow",
+  "version": "1.0.0",
+  "main": "xapp_api_server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "body-parser": "^2.2.0",
+    "express": "^5.1.0",
+    "mysql2": "^3.14.0"
+  }
+}
