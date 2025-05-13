@@ -76,23 +76,45 @@ app.post('/create', (req, res) => {
 
 // 更新 CMakeLists.txt（防重複）
 app.post('/update-cmake', (req, res) => {
-    const { app_name } = req.body;
-    const cmakePath = `${XAPP_DIR}/CMakeLists.txt`;
+  const { app_name } = req.body;
+  const cmakePath = `${XAPP_DIR}/CMakeLists.txt`;
 
-    fs.readFile(cmakePath, 'utf-8', (err, data) => {
-        if (err) return res.status(500).send({ error: 'Failed to read CMakeLists.txt' });
-        if (data.includes(`add_executable(${app_name}`)) {
-            return res.status(400).send({ error: 'CMakeLists already contains this app' });
-        }
+  fs.readFile(cmakePath, 'utf-8', (err, data) => {
+      if (err) return res.status(500).send({ error: 'Failed to read CMakeLists.txt' });
+      if (data.includes(`add_executable(${app_name}`)) {
+          return res.status(400).send({ error: 'CMakeLists already contains this app' });
+      }
 
-        const block = `\n# ${app_name}\nadd_executable(${app_name}\n  ${app_name}.c\n  ../../../../src/util/alg_ds/alg/defer.c\n)\n\ntarget_link_libraries(${app_name}\n    PUBLIC\n    e42_xapp\n    pthread\n    sctp\n    dl\n)\n`;
+      // ⚠️ 自動加入 CivetWeb + SSL 編譯設定
+      const block = `
+# ${app_name}
+add_executable(${app_name}
+  ${app_name}.c
+  civetweb/src/civetweb.c
+  ../../../../src/util/alg_ds/alg/defer.c
+)
 
-        fs.appendFile(cmakePath, block, (err) => {
-            if (err) return res.status(500).send({ error: 'Failed to update CMakeLists.txt' });
-            res.send({ message: 'CMakeLists.txt updated successfully' });
-        });
-    });
+# 啟用 CivetWeb SSL 支援
+target_compile_definitions(${app_name} PRIVATE USE_SSL NO_SSL_DL OPENSSL_API_1_1)
+
+target_link_libraries(${app_name}
+  PUBLIC
+  e42_xapp
+  pthread
+  sctp
+  dl
+  CURL::libcurl
+  \${OPENSSL_LIBRARIES}
+)
+`;
+
+      fs.appendFile(cmakePath, block, (err) => {
+          if (err) return res.status(500).send({ error: 'Failed to update CMakeLists.txt' });
+          res.send({ message: 'CMakeLists.txt updated successfully' });
+      });
+  });
 });
+
 
 // 編譯
 app.post('/compile', (req, res) => {
