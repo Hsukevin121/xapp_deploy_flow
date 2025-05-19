@@ -9,6 +9,12 @@ const PORT = 9100;
 
 const XAPP_DIR = "/home/ubuntu/flexric/examples/xApp/c/ctrl";
 const BUILD_DIR = "/home/ubuntu/flexric/build";
+const SNAPSHOT_DIR = '/home/ubuntu/xapp-snapshots';
+
+const INFLUX_HOST = 'http://192.168.31.133:8086';
+const INFLUX_DB = 'influx';
+
+app.use(express.json());
 
 // 建立 MySQL 連線池
 const db = mysql.createPool({
@@ -52,53 +58,50 @@ async function startSimulation() {
 }
 
 // 建立 xApp
-app.post('/create', (req, res) => {
-    const { app_name, policy_id } = req.body;
-    if (!/^[a-zA-Z0-9_-]+$/.test(app_name)) {
-        return res.status(400).send({ error: 'Invalid app_name' });
-    }
+app.post('/create', async (req, res) => {
+  const { app_name, policy_id } = req.body;
+  const numericPolicyId = typeof policy_id === 'string' ? parseInt(policy_id, 10) : policy_id;
 
-    const filePath = `${XAPP_DIR}/${app_name}.c`;
-    const content = req.body.content || '// TODO: your xApp code here';
+  if (!/^[a-zA-Z0-9_-]+$/.test(app_name)) {
+    return res.status(400).send({ error: 'Invalid app_name' });
+  }
+  if (isNaN(numericPolicyId)) {
+    return res.status(400).send({ error: `policy_id 必須是數字，目前為: ${policy_id}` });
+  }
 
-    fs.writeFile(filePath, content, (err) => {
-        if (err) return res.status(500).send({ error: 'Failed to create xApp file' });
+  const templatePath = `${XAPP_DIR}/template`;
+  const newAppPath = `${XAPP_DIR}/${app_name}`;
 
-        // 寫入 MySQL
-        db.query("INSERT INTO xapp_policies (app_name, policy_type_id) VALUES (?, ?)",
-            [app_name, policy_id|| ''],
-            (dbErr) => {
-                if (dbErr) return res.status(500).send({ error: 'DB insert failed', details: dbErr });
-                res.send({ message: 'xApp created and registered successfully' });
-            });
-    });
-});
+  if (fs.existsSync(newAppPath)) {
+    return res.status(400).send({ error: `App directory ${app_name} already exists.` });
+  }
 
-// 更新 CMakeLists.txt（防重複）
-app.post('/update-cmake', (req, res) => {
-  const { app_name } = req.body;
-  const cmakePath = `${XAPP_DIR}/CMakeLists.txt`;
+  try {
+    fs.cpSync(templatePath, newAppPath, { recursive: true });
 
-  fs.readFile(cmakePath, 'utf-8', (err, data) => {
-      if (err) return res.status(500).send({ error: 'Failed to read CMakeLists.txt' });
-      if (data.includes(`add_executable(${app_name}`)) {
-          return res.status(400).send({ error: 'CMakeLists already contains this app' });
-      }
+    const createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await db.promise().execute(
+      `INSERT INTO xapp_policies (app_name, policy_type_id, created_at, is_active, is_running) VALUES (?, ?, ?, 1, 0)`,
+      [app_name, numericPolicyId, createdAt]
+    );
 
-      // ⚠️ 自動加入 CivetWeb + SSL 編譯設定
-      const block = `
-# ${app_name}
-add_executable(${app_name}
-  ${app_name}.c
+    const cmakePath = `${XAPP_DIR}/CMakeLists.txt`;
+    const cmakeContent = fs.readFileSync(cmakePath, 'utf-8');
+    const marker = `# === MCP-AUTO-XAPP ===`;
+    const insertion = `add_executable(${app_name}
+  ${app_name}/main.c
+  ${app_name}/common.c
+  ${app_name}/influx.c
+  ${app_name}/foreachcell.c
+  ${app_name}/ho.c
+  ${app_name}/cell_down.c
   civetweb/src/civetweb.c
   ../../../../src/util/alg_ds/alg/defer.c
 )
 
-# 啟用 CivetWeb SSL 支援
 target_compile_definitions(${app_name} PRIVATE USE_SSL NO_SSL_DL OPENSSL_API_1_1)
 
 target_link_libraries(${app_name}
-  PUBLIC
   e42_xapp
   pthread
   sctp
@@ -108,11 +111,16 @@ target_link_libraries(${app_name}
 )
 `;
 
-      fs.appendFile(cmakePath, block, (err) => {
-          if (err) return res.status(500).send({ error: 'Failed to update CMakeLists.txt' });
-          res.send({ message: 'CMakeLists.txt updated successfully' });
-      });
-  });
+    if (!cmakeContent.includes(`add_executable(${app_name}`)) {
+      const updated = cmakeContent.replace(marker, `${marker}\n\n${insertion}`);
+      fs.writeFileSync(cmakePath, updated, 'utf-8');
+    }
+
+    res.send({ status: 'success', message: `Created and registered ${app_name}` });
+  } catch (err) {
+    console.error('[CREATE xApp ERROR]', err);
+    res.status(500).send({ error: 'Failed to create xApp', detail: err.message });
+  }
 });
 
 
@@ -300,6 +308,178 @@ app.get('/lookup/:policy_type_id', (req, res) => {
     });
 });
 
+
+
+// 讀取 xapp_config.h
+app.get('/read-config', (req, res) => {
+  const { app_name } = req.query;
+  const configPath = `${XAPP_DIR}/${app_name}/xapp_config.h`;
+  if (!fs.existsSync(configPath)) return res.status(404).send({ error: 'xapp_config.h not found' });
+  const content = fs.readFileSync(configPath, 'utf8');
+  res.send({ content });
+});
+
+// 讀取 foreachcell.c
+app.get('/read-logic', (req, res) => {
+  const { app_name } = req.query;
+  const logicPath = `${XAPP_DIR}/${app_name}/foreachcell.c`;
+  if (!fs.existsSync(logicPath)) return res.status(404).send({ error: 'foreachcell.c not found' });
+  const content = fs.readFileSync(logicPath, 'utf8');
+  res.send({ content });
+});
+
+// 更新 xapp_config.h
+app.post('/update-config', (req, res) => {
+  const { app_name, config } = req.body;
+  const configPath = `${XAPP_DIR}/${app_name}/xapp_config.h`;
+  const lines = Object.entries(config).map(([k, v]) => `#define ${k} ${v}`);
+  fs.writeFileSync(configPath, lines.join('\n'));
+  res.send({ message: 'Config updated' });
+});
+
+// 更新 foreachcell.c
+app.post('/update-logic', (req, res) => {
+  const { app_name, logic } = req.body;
+  const logicPath = `${XAPP_DIR}/${app_name}/foreachcell.c`;
+  fs.writeFileSync(logicPath, logic);
+  res.send({ message: 'Logic updated' });
+});
+
+// 從 InfluxDB 查詢 Load Balancing KPI：UE 數 + PRB 使用率 + UE 詳細資訊
+app.get('/kpi/current_status', async (req, res) => {
+  const cellList = ['du-cell-2', 'du-cell-3', 'du-cell-4'];
+  const ueCount = 30;
+  const ueCellMap = {}; // { cell_id: count }
+  const result = {};
+  const ueDetails = {}; // { ue_id: { cell, prb, sinr_serving, sinr_quality } }
+  const sinrStats = {}; // { cell_id: { total_sinr, bad_sinr_count, ue_count } }
+
+  try {
+    for (let ue_id = 1; ue_id <= ueCount; ue_id++) {
+      const cellQ = `SELECT last(value) FROM "ue_position_cell_${ue_id}" WHERE time > now() - 10m`;
+      const prbQ = `SELECT mean(value) FROM "ue_${ue_id}_rru.prbuseddl" WHERE time > now() - 10m`;
+      const sinrServingQ = `SELECT last(value) FROM "ue_${ue_id}_l3 serving sinr" WHERE time > now() - 10m`;
+
+      const [cellRes, prbRes, sinrSRes] = await Promise.all([
+        axios.get(`${INFLUX_HOST}/query?db=${INFLUX_DB}&q=${encodeURIComponent(cellQ)}`),
+        axios.get(`${INFLUX_HOST}/query?db=${INFLUX_DB}&q=${encodeURIComponent(prbQ)}`),
+        axios.get(`${INFLUX_HOST}/query?db=${INFLUX_DB}&q=${encodeURIComponent(sinrServingQ)}`)
+      ]);
+
+      const cellVal = cellRes.data?.results?.[0]?.series?.[0]?.values?.[0]?.[1];
+      const prbVal = prbRes.data?.results?.[0]?.series?.[0]?.values?.[0]?.[1] ?? null;
+      const sinrSVal = sinrSRes.data?.results?.[0]?.series?.[0]?.values?.[0]?.[1] ?? null;
+
+      const parsedCellVal = parseInt(cellVal);
+      if (!isNaN(parsedCellVal)) {
+        const cell = `du-cell-${parsedCellVal}`;
+        ueCellMap[cell] = (ueCellMap[cell] || 0) + 1;
+
+        if (!sinrStats[cell]) sinrStats[cell] = { total_sinr: 0, bad_sinr_count: 0, ue_count: 0 };
+        sinrStats[cell].ue_count++;
+
+        const sinrFloat = parseFloat(sinrSVal);
+        if (!isNaN(sinrFloat)) {
+          sinrStats[cell].total_sinr += sinrFloat;
+          if (sinrFloat < 13) sinrStats[cell].bad_sinr_count++;
+        }
+
+        let sinr_quality = 'unknown';
+        if (!isNaN(sinrFloat)) {
+          if (sinrFloat <= 0) sinr_quality = 'no_signal';
+          else if (sinrFloat < 13) sinr_quality = 'poor';
+          else if (sinrFloat < 20) sinr_quality = 'good';
+          else sinr_quality = 'excellent';
+        }
+
+        ueDetails[`ue-${ue_id}`] = {
+          cell,
+          prb: prbVal,
+          sinr_serving: sinrSVal,
+          sinr_quality
+        };
+      }
+    }
+
+    // 查詢每個 cell 的 PRB 使用率
+    for (const cell_id of cellList) {
+      const prbQuery = `SELECT mean(value) FROM "${cell_id}_dlprbusage" WHERE time > now() - 10m`;
+      const url = `${INFLUX_HOST}/query?db=${INFLUX_DB}&q=${encodeURIComponent(prbQuery)}`;
+      const response = await axios.get(url);
+      const prb = response.data?.results?.[0]?.series?.[0]?.values?.[0]?.[1] ?? null;
+
+      const sinr_info = sinrStats[cell_id] || { ue_count: 0, total_sinr: 0, bad_sinr_count: 0 };
+      const avg_sinr = sinr_info.ue_count > 0 ? sinr_info.total_sinr / sinr_info.ue_count : null;
+      const bad_sinr_ratio = sinr_info.ue_count > 0 ? sinr_info.bad_sinr_count / sinr_info.ue_count : null;
+
+      result[cell_id] = {
+        ue_count: ueCellMap[cell_id] || 0,
+        avg_prb: prb,
+        avg_sinr,
+        bad_sinr_ratio
+      };
+    }
+
+    res.send({ cells: result, ue_details: ueDetails });
+  } catch (e) {
+    res.status(500).send({ error: 'Load balancing query failed', detail: e.message });
+  }
+});
+
+app.post('/snapshot/save', async (req, res) => {
+  try {
+    if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR);
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `${SNAPSHOT_DIR}/snapshot_${timestamp}.json`;
+    const latestPath = `${SNAPSHOT_DIR}/latest.json`;
+    const prevPath = `${SNAPSHOT_DIR}/prev.json`;
+
+    const axiosRes = await axios.get('http://localhost:9100/kpi/load-balancing');
+    fs.writeFileSync(filename, JSON.stringify(axiosRes.data, null, 2));
+
+    if (fs.existsSync(latestPath)) {
+      const lastData = fs.readFileSync(latestPath);
+      fs.writeFileSync(prevPath, lastData);
+    }
+    fs.writeFileSync(latestPath, JSON.stringify(axiosRes.data, null, 2));
+
+    res.send({ message: 'Snapshot saved', file: filename, latest: 'latest.json', previous: fs.existsSync(prevPath) ? 'prev.json' : null });
+  } catch (e) {
+    res.status(500).send({ error: 'Snapshot save failed', detail: e.message });
+  }
+});
+
+// === KPI Snapshot Compare (latest vs previous) ===
+app.get('/snapshot/compare/latest', (req, res) => {
+  const beforePath = `${SNAPSHOT_DIR}/prev.json`;
+  const afterPath = `${SNAPSHOT_DIR}/latest.json`;
+
+  if (!fs.existsSync(beforePath) || !fs.existsSync(afterPath)) {
+    return res.status(400).send({ error: 'Missing snapshot files: prev.json or latest.json not found' });
+  }
+
+  try {
+    const beforeData = JSON.parse(fs.readFileSync(beforePath, 'utf8'));
+    const afterData = JSON.parse(fs.readFileSync(afterPath, 'utf8'));
+    const delta = {};
+
+    for (const cell of Object.keys(afterData.cells)) {
+      const prev = beforeData.cells[cell] || {};
+      const curr = afterData.cells[cell] || {};
+      delta[cell] = {
+        ue_count: curr.ue_count - (prev.ue_count || 0),
+        avg_prb_diff: (curr.avg_prb ?? 0) - (prev.avg_prb ?? 0),
+        avg_sinr_diff: (curr.avg_sinr ?? 0) - (prev.avg_sinr ?? 0),
+        bad_sinr_ratio_diff: (curr.bad_sinr_ratio ?? 0) - (prev.bad_sinr_ratio ?? 0)
+      };
+    }
+
+    res.send({ message: 'Snapshot comparison (prev vs latest)', delta });
+  } catch (e) {
+    res.status(500).send({ error: 'Snapshot compare failed', detail: e.message });
+  }
+});
 
 
 app.listen(PORT, '0.0.0.0', () => {
