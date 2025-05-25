@@ -41,15 +41,15 @@ async function startSimulation() {
     e2TermIp: "127.0.0.1",
     hoSinrDifference: 3,
     indicationPeriodicity: 0.1,
-    simTime: 1000,
+    simTime: 10000,
     KPM_E2functionID: 2,
     RC_E2functionID: 3,
-    N_Ues: 30,
-    N_MmWaveEnbNodes: 5,
+    N_Ues: 10,
+    N_MmWaveEnbNodes: 3,
     CenterFrequency: 3.5e9,
     Bandwidth: 20e6,
-    IntersideDistanceUEs: 500,
-    IntersideDistanceCells: 600,
+    IntersideDistanceUEs: 350,
+    IntersideDistanceCells: 350,
     scenario: "scratch/scenario-zero-with_parallel_loging.cc",
     flags: "true"
   }, {
@@ -95,6 +95,7 @@ app.post('/create', async (req, res) => {
   ${app_name}/foreachcell.c
   ${app_name}/ho.c
   ${app_name}/cell_down.c
+  ${app_name}/target_selector.c
   civetweb/src/civetweb.c
   ../../../../src/util/alg_ds/alg/defer.c
 )
@@ -319,31 +320,62 @@ app.get('/read-config', (req, res) => {
   res.send({ content });
 });
 
-// 讀取 foreachcell.c
+// 讀取 target_selector.c
 app.get('/read-logic', (req, res) => {
   const { app_name } = req.query;
-  const logicPath = `${XAPP_DIR}/${app_name}/foreachcell.c`;
-  if (!fs.existsSync(logicPath)) return res.status(404).send({ error: 'foreachcell.c not found' });
+  const logicPath = `${XAPP_DIR}/${app_name}/target_selector.c`;
+  if (!fs.existsSync(logicPath)) return res.status(404).send({ error: 'target_selector.c not found' });
   const content = fs.readFileSync(logicPath, 'utf8');
   res.send({ content });
 });
 
 // 更新 xapp_config.h
 app.post('/update-config', (req, res) => {
-  const { app_name, config } = req.body;
+  const { app_name, config_text } = req.body;
+
+  if (!app_name || typeof app_name !== 'string') {
+    return res.status(400).send({ error: 'app_name 必須是字串' });
+  }
+  if (typeof config_text !== 'string') {
+    return res.status(400).send({ error: 'config_text 必須是 text' });
+  }
+
   const configPath = `${XAPP_DIR}/${app_name}/xapp_config.h`;
-  const lines = Object.entries(config).map(([k, v]) => `#define ${k} ${v}`);
-  fs.writeFileSync(configPath, lines.join('\n'));
-  res.send({ message: 'Config updated' });
+
+  try {
+    fs.writeFileSync(configPath, config_text);
+    res.send({ message: 'xapp_config.h 已成功覆蓋' });
+  } catch (err) {
+    console.error('[update-config] 錯誤:', err);
+    res.status(500).send({ error: '寫入失敗', detail: err.message });
+  }
 });
 
-// 更新 foreachcell.c
+// 更新 target_selector.c
 app.post('/update-logic', (req, res) => {
-  const { app_name, logic } = req.body;
-  const logicPath = `${XAPP_DIR}/${app_name}/foreachcell.c`;
-  fs.writeFileSync(logicPath, logic);
-  res.send({ message: 'Logic updated' });
+  const { app_name, logic_text } = req.body;
+
+  if (!app_name || typeof app_name !== 'string') {
+    return res.status(400).send({ error: 'app_name 必須是字串' });
+  }
+  if (typeof logic_text !== 'string') {
+    return res.status(400).send({ error: 'logic_text 必須是 text' });
+  }
+
+  const logicPath = `${XAPP_DIR}/${app_name}/target_selector.c`;
+
+  try {
+    fs.writeFileSync(logicPath, logic_text);
+    res.send({ message: 'target_selector.c 已成功覆蓋' });
+  } catch (err) {
+    console.error('[update-logic] 錯誤:', err);
+    res.status(500).send({ error: '寫入失敗', detail: err.message });
+  }
 });
+
+
+
+
 
 // 從 InfluxDB 查詢 Load Balancing KPI：UE 數 + PRB 使用率 + UE 詳細資訊
 app.get('/kpi/current_status', async (req, res) => {
@@ -435,7 +467,7 @@ app.post('/snapshot/save', async (req, res) => {
     const latestPath = `${SNAPSHOT_DIR}/latest.json`;
     const prevPath = `${SNAPSHOT_DIR}/prev.json`;
 
-    const axiosRes = await axios.get('http://localhost:9100/kpi/load-balancing');
+    const axiosRes = await axios.get('http://localhost:9100/kpi/current_status');
     fs.writeFileSync(filename, JSON.stringify(axiosRes.data, null, 2));
 
     if (fs.existsSync(latestPath)) {
