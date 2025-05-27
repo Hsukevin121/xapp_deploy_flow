@@ -351,6 +351,19 @@ app.post('/update-config', (req, res) => {
   }
 });
 
+// 修改部分code
+app.post('/patch-config', (req, res) => {
+  const { app_name, edits } = req.body;
+  const configPath = `${XAPP_DIR}/${app_name}/xapp_config.h`;
+  if (!fs.existsSync(configPath)) return res.status(404).send({ error: 'not found' });
+  let lines = fs.readFileSync(configPath, 'utf8').split('\n');
+  for (const {line, new_text} of edits) {
+    lines[line - 1] = new_text; // line號從1開始
+  }
+  fs.writeFileSync(configPath, lines.join('\n'), 'utf8');
+  res.send({ message: '部分內容已更新' });
+});
+
 // 更新 target_selector.c
 app.post('/update-logic', (req, res) => {
   const { app_name, logic_text } = req.body;
