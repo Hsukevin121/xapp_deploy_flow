@@ -127,7 +127,13 @@ target_link_libraries(${app_name}
 
 // 編譯
 app.post('/compile', (req, res) => {
-    const command = `cd ${BUILD_DIR} && sudo cmake .. -DE2AP_VERSION=E2AP_V1 -DKPM_VERSION=KPM_V3_00 && sudo make -j8`;
+    const { app_name } = req.body;
+
+    if (!app_name || typeof app_name !== 'string') {
+        return res.status(400).send({ error: 'app_name 必須是字串' });
+    }
+
+    const command = `cd ${BUILD_DIR} && sudo cmake .. -DE2AP_VERSION=E2AP_V1 -DKPM_VERSION=KPM_V3_00 && sudo make -j8 ${app_name}`;
     exec(command, { maxBuffer: 1024 * 500 }, (error, stdout, stderr) => {
         if (error) {
             return res.status(500).send({
